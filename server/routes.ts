@@ -1,0 +1,420 @@
+import type { Express } from "express";
+import { createServer, type Server } from "http";
+import { storage } from "./storage";
+import { insertApiConfigurationSchema, insertMigrationJobSchema, insertBackupSchema } from "@shared/schema";
+import { z } from "zod";
+
+// Cloudflare API client
+class CloudflareAPI {
+  private email: string;
+  private apiKey: string;
+  private baseUrl = "https://api.cloudflare.com/client/v4";
+
+  constructor(email: string, apiKey: string) {
+    this.email = email;
+    this.apiKey = apiKey;
+  }
+
+  private async request<T>(endpoint: string, options: RequestInit = {}): Promise<T> {
+    const url = `${this.baseUrl}${endpoint}`;
+    const response = await fetch(url, {
+      ...options,
+      headers: {
+        "X-Auth-Email": this.email,
+        "X-Auth-Key": this.apiKey,
+        "Content-Type": "application/json",
+        ...options.headers,
+      },
+    });
+
+    if (!response.ok) {
+      throw new Error(`Cloudflare API error: ${response.status} ${response.statusText}`);
+    }
+
+    return response.json();
+  }
+
+  async testConnection() {
+    return this.request("/user/tokens/verify");
+  }
+
+  async getZones() {
+    return this.request("/zones");
+  }
+
+  async getDnsRecords(zoneId: string) {
+    return this.request(`/zones/${zoneId}/dns_records`);
+  }
+
+  async updateDnsRecord(zoneId: string, recordId: string, data: any) {
+    return this.request(`/zones/${zoneId}/dns_records/${recordId}`, {
+      method: "PATCH",
+      body: JSON.stringify(data),
+    });
+  }
+}
+
+export async function registerRoutes(app: Express): Promise<Server> {
+  // API Configuration endpoints
+  app.post("/api/config", async (req, res) => {
+    try {
+      const config = insertApiConfigurationSchema.parse(req.body);
+      const savedConfig = await storage.saveApiConfiguration(config);
+      res.json(savedConfig);
+    } catch (error) {
+      res.status(400).json({ message: "Invalid configuration data", error: error.message });
+    }
+  });
+
+  app.get("/api/config", async (req, res) => {
+    try {
+      const config = await storage.getApiConfiguration();
+      if (!config) {
+        return res.status(404).json({ message: "Configuration not found" });
+      }
+      // Don't return the actual API key for security
+      const { apiKey, ...safeConfig } = config;
+      res.json({ ...safeConfig, hasApiKey: Boolean(apiKey) });
+    } catch (error) {
+      res.status(500).json({ message: "Failed to get configuration", error: error.message });
+    }
+  });
+
+  app.post("/api/config/test", async (req, res) => {
+    try {
+      const config = await storage.getApiConfiguration();
+      if (!config) {
+        return res.status(400).json({ message: "No configuration found" });
+      }
+
+      const cfApi = new CloudflareAPI(config.email, config.apiKey);
+      const result = await cfApi.testConnection();
+      
+      await storage.updateConnectionStatus(true);
+      res.json({ success: true, result });
+    } catch (error) {
+      await storage.updateConnectionStatus(false);
+      res.status(400).json({ message: "Connection failed", error: error.message });
+    }
+  });
+
+  // DNS scanning endpoints
+  app.post("/api/dns/scan", async (req, res) => {
+    try {
+      const config = await storage.getApiConfiguration();
+      if (!config) {
+        return res.status(400).json({ message: "No configuration found" });
+      }
+
+      const cfApi = new CloudflareAPI(config.email, config.apiKey);
+      
+      // Get all zones
+      const zonesResponse = await cfApi.getZones();
+      const zones = zonesResponse.result.map((zone: any) => ({
+        id: zone.id,
+        name: zone.name,
+        status: zone.status,
+        accountId: zone.account?.id,
+      }));
+
+      await storage.saveZones(zones);
+
+      // Get DNS records for all zones
+      const allDnsRecords = [];
+      for (const zone of zones) {
+        try {
+          const recordsResponse = await cfApi.getDnsRecords(zone.id);
+          const records = recordsResponse.result.map((record: any) => ({
+            id: record.id,
+            zoneId: record.zone_id,
+            zoneName: record.zone_name,
+            name: record.name,
+            type: record.type,
+            content: record.content,
+            ttl: record.ttl,
+            proxied: record.proxied || false,
+            locked: record.locked || false,
+          }));
+          allDnsRecords.push(...records);
+        } catch (error) {
+          console.error(`Failed to get DNS records for zone ${zone.name}:`, error);
+        }
+      }
+
+      await storage.saveDnsRecords(allDnsRecords);
+      await storage.addActivityLogEntry({
+        timestamp: new Date(),
+        type: 'success',
+        message: `Scanned ${allDnsRecords.length} DNS records from ${zones.length} zones`,
+      });
+
+      res.json({ 
+        success: true, 
+        zones: zones.length, 
+        records: allDnsRecords.length 
+      });
+    } catch (error) {
+      await storage.addActivityLogEntry({
+        timestamp: new Date(),
+        type: 'error',
+        message: `DNS scan failed: ${error.message}`,
+      });
+      res.status(500).json({ message: "DNS scan failed", error: error.message });
+    }
+  });
+
+  app.get("/api/dns/records", async (req, res) => {
+    try {
+      const { ip } = req.query;
+      let records;
+      
+      if (ip && typeof ip === 'string') {
+        records = await storage.getDnsRecordsByIp(ip);
+      } else {
+        records = await storage.getDnsRecords();
+      }
+      
+      res.json(records);
+    } catch (error) {
+      res.status(500).json({ message: "Failed to get DNS records", error: error.message });
+    }
+  });
+
+  // Migration endpoints
+  app.post("/api/migration/start", async (req, res) => {
+    try {
+      const { oldIp, newIp, recordIds } = req.body;
+      
+      if (!oldIp || !newIp || !Array.isArray(recordIds) || recordIds.length === 0) {
+        return res.status(400).json({ message: "Missing required parameters" });
+      }
+
+      const job = await storage.createMigrationJob({
+        oldIp,
+        newIp,
+        totalRecords: recordIds.length,
+      });
+
+      // Initialize record statuses
+      const recordStatuses = recordIds.map((recordId: string) => ({
+        id: `${job.id}-${recordId}`,
+        jobId: job.id,
+        recordId,
+        status: 'pending',
+        errorMessage: null,
+        updatedAt: new Date(),
+      }));
+      
+      await storage.saveMigrationRecordStatus(recordStatuses);
+
+      await storage.addActivityLogEntry({
+        timestamp: new Date(),
+        type: 'info',
+        message: `Starting migration for ${recordIds.length} DNS records`,
+        details: `${oldIp} → ${newIp}`,
+      });
+
+      // Start migration process asynchronously
+      processMigration(job.id, recordIds, oldIp, newIp);
+
+      res.json({ jobId: job.id });
+    } catch (error) {
+      res.status(500).json({ message: "Failed to start migration", error: error.message });
+    }
+  });
+
+  app.get("/api/migration/:jobId/progress", async (req, res) => {
+    try {
+      const { jobId } = req.params;
+      const job = await storage.getMigrationJob(jobId);
+      
+      if (!job) {
+        return res.status(404).json({ message: "Migration job not found" });
+      }
+
+      const processingRecords = job.totalRecords - job.completedRecords - job.failedRecords;
+      const progressPercentage = Math.round(
+        ((job.completedRecords + job.failedRecords) / job.totalRecords) * 100
+      );
+
+      const progress = {
+        jobId: job.id,
+        totalRecords: job.totalRecords,
+        completedRecords: job.completedRecords,
+        failedRecords: job.failedRecords,
+        processingRecords,
+        status: job.status,
+        progressPercentage,
+      };
+
+      res.json(progress);
+    } catch (error) {
+      res.status(500).json({ message: "Failed to get migration progress", error: error.message });
+    }
+  });
+
+  // Activity log endpoint
+  app.get("/api/activity", async (req, res) => {
+    try {
+      const limit = req.query.limit ? parseInt(req.query.limit as string) : 50;
+      const log = await storage.getActivityLog(limit);
+      res.json(log);
+    } catch (error) {
+      res.status(500).json({ message: "Failed to get activity log", error: error.message });
+    }
+  });
+
+  app.delete("/api/activity", async (req, res) => {
+    try {
+      await storage.clearActivityLog();
+      res.json({ success: true });
+    } catch (error) {
+      res.status(500).json({ message: "Failed to clear activity log", error: error.message });
+    }
+  });
+
+  // Backup endpoints
+  app.post("/api/backup", async (req, res) => {
+    try {
+      const { name, recordIds } = req.body;
+      
+      let records;
+      if (recordIds && Array.isArray(recordIds)) {
+        const allRecords = await storage.getDnsRecords();
+        records = allRecords.filter(record => recordIds.includes(record.id));
+      } else {
+        records = await storage.getDnsRecords();
+      }
+
+      const backup = await storage.createBackup({
+        name: name || `dns-backup-${new Date().toISOString().split('T')[0]}`,
+        recordCount: records.length,
+        data: JSON.stringify(records),
+      });
+
+      await storage.addActivityLogEntry({
+        timestamp: new Date(),
+        type: 'success',
+        message: `Created backup with ${records.length} DNS records`,
+        details: backup.name,
+      });
+
+      res.json(backup);
+    } catch (error) {
+      res.status(500).json({ message: "Failed to create backup", error: error.message });
+    }
+  });
+
+  app.get("/api/backups", async (req, res) => {
+    try {
+      const backups = await storage.getBackups();
+      res.json(backups);
+    } catch (error) {
+      res.status(500).json({ message: "Failed to get backups", error: error.message });
+    }
+  });
+
+  app.get("/api/backup/:backupId", async (req, res) => {
+    try {
+      const { backupId } = req.params;
+      const backup = await storage.getBackup(backupId);
+      
+      if (!backup) {
+        return res.status(404).json({ message: "Backup not found" });
+      }
+
+      res.json(backup);
+    } catch (error) {
+      res.status(500).json({ message: "Failed to get backup", error: error.message });
+    }
+  });
+
+  const httpServer = createServer(app);
+  return httpServer;
+}
+
+// Async function to process migration
+async function processMigration(jobId: string, recordIds: string[], oldIp: string, newIp: string) {
+  try {
+    const config = await storage.getApiConfiguration();
+    if (!config) {
+      throw new Error("No API configuration found");
+    }
+
+    const cfApi = new CloudflareAPI(config.email, config.apiKey);
+    await storage.updateMigrationJobStatus(jobId, "running");
+
+    let completed = 0;
+    let failed = 0;
+
+    for (const recordId of recordIds) {
+      try {
+        // Update status to processing
+        await storage.updateMigrationRecordStatus(`${jobId}-${recordId}`, "processing");
+
+        // Get the record details
+        const allRecords = await storage.getDnsRecords();
+        const record = allRecords.find(r => r.id === recordId);
+
+        if (!record) {
+          throw new Error("Record not found");
+        }
+
+        // Update the DNS record
+        await cfApi.updateDnsRecord(record.zoneId, record.id, {
+          type: record.type,
+          name: record.name,
+          content: newIp,
+          ttl: record.ttl,
+          proxied: record.proxied,
+        });
+
+        // Update local storage
+        record.content = newIp;
+        await storage.saveDnsRecords(allRecords);
+
+        // Update status to completed
+        await storage.updateMigrationRecordStatus(`${jobId}-${recordId}`, "completed");
+        completed++;
+
+        await storage.addActivityLogEntry({
+          timestamp: new Date(),
+          type: 'success',
+          message: `Updated DNS record for ${record.name}`,
+          details: `${oldIp} → ${newIp}`,
+        });
+
+      } catch (error) {
+        await storage.updateMigrationRecordStatus(`${jobId}-${recordId}`, "failed", error.message);
+        failed++;
+
+        await storage.addActivityLogEntry({
+          timestamp: new Date(),
+          type: 'error',
+          message: `Failed to update DNS record: ${error.message}`,
+        });
+      }
+
+      // Update job progress
+      await storage.updateMigrationJobProgress(jobId, completed, failed);
+    }
+
+    // Mark job as completed
+    await storage.updateMigrationJobStatus(jobId, "completed");
+
+    await storage.addActivityLogEntry({
+      timestamp: new Date(),
+      type: 'success',
+      message: `Migration completed: ${completed} success, ${failed} failed`,
+    });
+
+  } catch (error) {
+    await storage.updateMigrationJobStatus(jobId, "failed");
+    
+    await storage.addActivityLogEntry({
+      timestamp: new Date(),
+      type: 'error',
+      message: `Migration failed: ${error.message}`,
+    });
+  }
+}
