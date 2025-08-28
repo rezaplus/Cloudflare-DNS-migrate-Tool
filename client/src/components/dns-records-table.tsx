@@ -29,6 +29,7 @@ export default function DnsRecordsTable({
   const [recordTypeFilter, setRecordTypeFilter] = useState("all");
   const [filteredRecords, setFilteredRecords] = useState<DnsRecord[]>(records);
   const [domainTestResults, setDomainTestResults] = useState<any[]>([]);
+  const [showTestResults, setShowTestResults] = useState(false);
   
   const { toast } = useToast();
 
@@ -76,6 +77,7 @@ export default function DnsRecordsTable({
     },
     onSuccess: (response: any) => {
       setDomainTestResults(response.results || []);
+      setShowTestResults(true);
       toast({
         title: "Domain Test Complete",
         description: `Tested ${response.totalDomains} domains successfully.`,
@@ -89,58 +91,6 @@ export default function DnsRecordsTable({
       });
     }
   });
-
-  const getDomainTestResult = (domain: string) => {
-    return domainTestResults.find(result => result.domain === domain);
-  };
-
-  const getDomainStatusBadge = (record: DnsRecord) => {
-    const testResult = getDomainTestResult(record.name);
-    
-    if (!testResult) {
-      return (
-        <span className="px-2 py-1 text-xs font-medium bg-gray-500 text-white rounded-md">
-          Not Tested
-        </span>
-      );
-    }
-
-    if (testResult.status === 200) {
-      return (
-        <div className="flex flex-col space-y-1">
-          <span className="px-2 py-1 text-xs font-medium bg-green-500 text-white rounded-md flex items-center">
-            <CheckCircle className="w-3 h-3 mr-1" />
-            200 OK
-          </span>
-          <span className="text-xs text-muted-foreground">IP: {testResult.currentIp || 'N/A'}</span>
-        </div>
-      );
-    }
-
-    if (testResult.status && testResult.status !== 200) {
-      return (
-        <div className="flex flex-col space-y-1">
-          <span className="px-2 py-1 text-xs font-medium bg-red-500 text-white rounded-md flex items-center">
-            <XCircle className="w-3 h-3 mr-1" />
-            {testResult.status}
-          </span>
-          <span className="text-xs text-muted-foreground">IP: {testResult.currentIp || 'N/A'}</span>
-        </div>
-      );
-    }
-
-    return (
-      <div className="flex flex-col space-y-1">
-        <span className="px-2 py-1 text-xs font-medium bg-yellow-500 text-white rounded-md flex items-center">
-          <AlertCircle className="w-3 h-3 mr-1" />
-          Error
-        </span>
-        <span className="text-xs text-red-500 truncate max-w-24" title={testResult.error}>
-          {testResult.error?.substring(0, 20)}...
-        </span>
-      </div>
-    );
-  };
 
   const getStatusBadge = (record: DnsRecord) => {
     if (record.content === migrationConfig.oldIp) {
@@ -206,6 +156,16 @@ export default function DnsRecordsTable({
                 <Globe className="w-4 h-4 mr-2" />
                 {testDomainsMutation.isPending ? "Testing..." : "Test Domains"}
               </Button>
+              {domainTestResults.length > 0 && (
+                <Button
+                  onClick={() => setShowTestResults(!showTestResults)}
+                  variant="outline"
+                  size="sm"
+                  data-testid="button-toggle-test-results"
+                >
+                  {showTestResults ? "Hide" : "Show"} Test Results
+                </Button>
+              )}
               <div className="relative">
                 <Input
                   type="text"
@@ -265,9 +225,6 @@ export default function DnsRecordsTable({
                   Status
                 </th>
                 <th className="px-6 py-3 text-left text-xs font-medium text-muted-foreground uppercase tracking-wider">
-                  Domain Status
-                </th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-muted-foreground uppercase tracking-wider">
                   Actions
                 </th>
               </tr>
@@ -305,9 +262,6 @@ export default function DnsRecordsTable({
                   </td>
                   <td className="px-6 py-4">
                     {getStatusBadge(record)}
-                  </td>
-                  <td className="px-6 py-4">
-                    {getDomainStatusBadge(record)}
                   </td>
                   <td className="px-6 py-4">
                     <div className="flex items-center space-x-2">
@@ -354,6 +308,56 @@ export default function DnsRecordsTable({
         </div>
       </Card>
 
+      {/* Domain Test Results */}
+      {showTestResults && domainTestResults.length > 0 && (
+        <Card className="mt-6">
+          <div className="px-6 py-4 border-b border-border">
+            <h3 className="text-lg font-semibold text-foreground">Domain Test Results</h3>
+            <p className="text-sm text-muted-foreground">
+              Showing HTTP status and current IP for {domainTestResults.length} domains
+            </p>
+          </div>
+          <CardContent className="p-0">
+            <div className="max-h-96 overflow-y-auto">
+              <div className="space-y-2 p-4">
+                {domainTestResults.map((result, index) => (
+                  <div 
+                    key={index}
+                    className="flex items-center justify-between p-3 rounded-lg border border-border hover:bg-muted/50"
+                    data-testid={`domain-test-result-${index}`}
+                  >
+                    <div className="flex-1">
+                      <div className="flex items-center space-x-2">
+                        <span className="font-medium text-foreground">{result.domain}</span>
+                        {result.status === 200 ? (
+                          <CheckCircle className="w-4 h-4 text-green-500" />
+                        ) : result.status && result.status !== 200 ? (
+                          <XCircle className="w-4 h-4 text-red-500" />
+                        ) : (
+                          <AlertCircle className="w-4 h-4 text-yellow-500" />
+                        )}
+                      </div>
+                      {result.error && (
+                        <p className="text-xs text-red-500 mt-1">{result.error}</p>
+                      )}
+                    </div>
+                    <div className="flex items-center space-x-4">
+                      <div className="text-right">
+                        <div className="text-sm font-medium">
+                          Status: {result.status || 'N/A'}
+                        </div>
+                        <div className="text-xs text-muted-foreground">
+                          IP: {result.currentIp || 'N/A'}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+      )}
     </section>
   );
 }
