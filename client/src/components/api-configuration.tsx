@@ -186,7 +186,7 @@ export default function ApiConfiguration({
                   type="button"
                   variant="secondary"
                   onClick={handleTestConnection}
-                  disabled={testConnectionMutation.isPending || !configData?.hasApiKey}
+                  disabled={testConnectionMutation.isPending || !(configData as any)?.hasApiKey}
                   data-testid="button-test-connection"
                 >
                   {testConnectionMutation.isPending ? (

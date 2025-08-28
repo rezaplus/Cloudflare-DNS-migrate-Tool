@@ -36,7 +36,7 @@ export default function Dashboard() {
     : dnsRecords;
 
   useEffect(() => {
-    if (configData?.isConnected) {
+    if ((configData as any)?.isConnected) {
       setIsConnected(true);
     }
   }, [configData]);

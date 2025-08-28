@@ -35,7 +35,8 @@ class CloudflareAPI {
   }
 
   async testConnection() {
-    return this.request("/user/tokens/verify");
+    // For Global API Key authentication, we use /user endpoint to verify
+    return this.request("/user");
   }
 
   async getZones() {
@@ -61,8 +62,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const config = insertApiConfigurationSchema.parse(req.body);
       const savedConfig = await storage.saveApiConfiguration(config);
       res.json(savedConfig);
-    } catch (error) {
-      res.status(400).json({ message: "Invalid configuration data", error: error.message });
+    } catch (error: any) {
+      res.status(400).json({ message: "Invalid configuration data", error: error?.message || 'Unknown error' });
     }
   });
 
@@ -75,8 +76,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
       // Don't return the actual API key for security
       const { apiKey, ...safeConfig } = config;
       res.json({ ...safeConfig, hasApiKey: Boolean(apiKey) });
-    } catch (error) {
-      res.status(500).json({ message: "Failed to get configuration", error: error.message });
+    } catch (error: any) {
+      res.status(500).json({ message: "Failed to get configuration", error: error?.message || 'Unknown error' });
     }
   });
 
@@ -87,14 +88,16 @@ export async function registerRoutes(app: Express): Promise<Server> {
         return res.status(400).json({ message: "No configuration found" });
       }
 
+      console.log('Testing connection with email:', config.email);
       const cfApi = new CloudflareAPI(config.email, config.apiKey);
       const result = await cfApi.testConnection();
       
       await storage.updateConnectionStatus(true);
       res.json({ success: true, result });
-    } catch (error) {
+    } catch (error: any) {
+      console.error('Connection test failed:', error?.message || error);
       await storage.updateConnectionStatus(false);
-      res.status(400).json({ message: "Connection failed", error: error.message });
+      res.status(400).json({ message: "Connection failed", error: error?.message || 'Unknown error' });
     }
   });
 
@@ -109,7 +112,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const cfApi = new CloudflareAPI(config.email, config.apiKey);
       
       // Get all zones
-      const zonesResponse = await cfApi.getZones();
+      const zonesResponse: any = await cfApi.getZones();
       const zones = zonesResponse.result.map((zone: any) => ({
         id: zone.id,
         name: zone.name,
@@ -123,7 +126,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const allDnsRecords = [];
       for (const zone of zones) {
         try {
-          const recordsResponse = await cfApi.getDnsRecords(zone.id);
+          const recordsResponse: any = await cfApi.getDnsRecords(zone.id);
           const records = recordsResponse.result.map((record: any) => ({
             id: record.id,
             zoneId: record.zone_id,
@@ -136,7 +139,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
             locked: record.locked || false,
           }));
           allDnsRecords.push(...records);
-        } catch (error) {
+        } catch (error: any) {
           console.error(`Failed to get DNS records for zone ${zone.name}:`, error);
         }
       }
@@ -153,13 +156,13 @@ export async function registerRoutes(app: Express): Promise<Server> {
         zones: zones.length, 
         records: allDnsRecords.length 
       });
-    } catch (error) {
+    } catch (error: any) {
       await storage.addActivityLogEntry({
         timestamp: new Date(),
         type: 'error',
-        message: `DNS scan failed: ${error.message}`,
+        message: `DNS scan failed: ${error?.message || 'Unknown error'}`,
       });
-      res.status(500).json({ message: "DNS scan failed", error: error.message });
+      res.status(500).json({ message: "DNS scan failed", error: error?.message || 'Unknown error' });
     }
   });
 
@@ -175,8 +178,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
       }
       
       res.json(records);
-    } catch (error) {
-      res.status(500).json({ message: "Failed to get DNS records", error: error.message });
+    } catch (error: any) {
+      res.status(500).json({ message: "Failed to get DNS records", error: error?.message || 'Unknown error' });
     }
   });
 
@@ -218,8 +221,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
       processMigration(job.id, recordIds, oldIp, newIp);
 
       res.json({ jobId: job.id });
-    } catch (error) {
-      res.status(500).json({ message: "Failed to start migration", error: error.message });
+    } catch (error: any) {
+      res.status(500).json({ message: "Failed to start migration", error: error?.message || 'Unknown error' });
     }
   });
 
@@ -232,24 +235,24 @@ export async function registerRoutes(app: Express): Promise<Server> {
         return res.status(404).json({ message: "Migration job not found" });
       }
 
-      const processingRecords = job.totalRecords - job.completedRecords - job.failedRecords;
+      const processingRecords = job.totalRecords - (job.completedRecords || 0) - (job.failedRecords || 0);
       const progressPercentage = Math.round(
-        ((job.completedRecords + job.failedRecords) / job.totalRecords) * 100
+        (((job.completedRecords || 0) + (job.failedRecords || 0)) / job.totalRecords) * 100
       );
 
       const progress = {
         jobId: job.id,
         totalRecords: job.totalRecords,
-        completedRecords: job.completedRecords,
-        failedRecords: job.failedRecords,
+        completedRecords: job.completedRecords || 0,
+        failedRecords: job.failedRecords || 0,
         processingRecords,
         status: job.status,
         progressPercentage,
       };
 
       res.json(progress);
-    } catch (error) {
-      res.status(500).json({ message: "Failed to get migration progress", error: error.message });
+    } catch (error: any) {
+      res.status(500).json({ message: "Failed to get migration progress", error: error?.message || 'Unknown error' });
     }
   });
 
@@ -259,8 +262,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const limit = req.query.limit ? parseInt(req.query.limit as string) : 50;
       const log = await storage.getActivityLog(limit);
       res.json(log);
-    } catch (error) {
-      res.status(500).json({ message: "Failed to get activity log", error: error.message });
+    } catch (error: any) {
+      res.status(500).json({ message: "Failed to get activity log", error: error?.message || 'Unknown error' });
     }
   });
 
@@ -268,8 +271,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
     try {
       await storage.clearActivityLog();
       res.json({ success: true });
-    } catch (error) {
-      res.status(500).json({ message: "Failed to clear activity log", error: error.message });
+    } catch (error: any) {
+      res.status(500).json({ message: "Failed to clear activity log", error: error?.message || 'Unknown error' });
     }
   });
 
@@ -300,8 +303,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
       });
 
       res.json(backup);
-    } catch (error) {
-      res.status(500).json({ message: "Failed to create backup", error: error.message });
+    } catch (error: any) {
+      res.status(500).json({ message: "Failed to create backup", error: error?.message || 'Unknown error' });
     }
   });
 
@@ -309,8 +312,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
     try {
       const backups = await storage.getBackups();
       res.json(backups);
-    } catch (error) {
-      res.status(500).json({ message: "Failed to get backups", error: error.message });
+    } catch (error: any) {
+      res.status(500).json({ message: "Failed to get backups", error: error?.message || 'Unknown error' });
     }
   });
 
@@ -324,8 +327,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
       }
 
       res.json(backup);
-    } catch (error) {
-      res.status(500).json({ message: "Failed to get backup", error: error.message });
+    } catch (error: any) {
+      res.status(500).json({ message: "Failed to get backup", error: error?.message || 'Unknown error' });
     }
   });
 
@@ -384,14 +387,14 @@ async function processMigration(jobId: string, recordIds: string[], oldIp: strin
           details: `${oldIp} → ${newIp}`,
         });
 
-      } catch (error) {
-        await storage.updateMigrationRecordStatus(`${jobId}-${recordId}`, "failed", error.message);
+      } catch (error: any) {
+        await storage.updateMigrationRecordStatus(`${jobId}-${recordId}`, "failed", error?.message || 'Unknown error');
         failed++;
 
         await storage.addActivityLogEntry({
           timestamp: new Date(),
           type: 'error',
-          message: `Failed to update DNS record: ${error.message}`,
+          message: `Failed to update DNS record: ${error?.message || 'Unknown error'}`,
         });
       }
 
@@ -408,13 +411,13 @@ async function processMigration(jobId: string, recordIds: string[], oldIp: strin
       message: `Migration completed: ${completed} success, ${failed} failed`,
     });
 
-  } catch (error) {
+  } catch (error: any) {
     await storage.updateMigrationJobStatus(jobId, "failed");
     
     await storage.addActivityLogEntry({
       timestamp: new Date(),
       type: 'error',
-      message: `Migration failed: ${error.message}`,
+      message: `Migration failed: ${error?.message || 'Unknown error'}`,
     });
   }
 }
