@@ -3,6 +3,10 @@ import { createServer, type Server } from "http";
 import { storage } from "./storage";
 import { insertApiConfigurationSchema, insertMigrationJobSchema, insertBackupSchema } from "@shared/schema";
 import { z } from "zod";
+import { promisify } from "util";
+import * as dns from "dns";
+
+const dnsLookup = promisify(dns.lookup);
 
 // Cloudflare API client
 class CloudflareAPI {
@@ -280,6 +284,70 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
+  // Test all domains - manual domain health check
+  app.post("/api/domains/test", async (req, res) => {
+    try {
+      const records = await storage.getDnsRecords();
+      
+      // Get unique domain names from DNS records (A and AAAA records only)
+      const uniqueDomains = Array.from(new Set(
+        records
+          .filter(record => record.type === 'A' || record.type === 'AAAA')
+          .map(record => record.name)
+          .filter(name => name) // Remove null/empty names
+      ));
+
+      if (uniqueDomains.length === 0) {
+        return res.status(400).json({ 
+          message: "No domains found to test", 
+          error: "Please scan DNS records first" 
+        });
+      }
+
+      console.log(`Testing ${uniqueDomains.length} domains...`);
+
+      // Test domains in parallel (but limit concurrency to avoid overwhelming)
+      const batchSize = 10;
+      const results = [];
+      
+      for (let i = 0; i < uniqueDomains.length; i += batchSize) {
+        const batch = uniqueDomains.slice(i, i + batchSize);
+        const batchResults = await Promise.all(
+          batch.map(domain => testDomain(domain))
+        );
+        results.push(...batchResults);
+      }
+
+      // Log activity
+      await storage.addActivityLogEntry({
+        timestamp: new Date(),
+        type: 'info',
+        message: `Tested ${results.length} domains`,
+        details: `${results.filter(r => r.status === 200).length} returned 200 status`
+      });
+
+      res.json({
+        success: true,
+        totalDomains: results.length,
+        results: results.sort((a, b) => a.domain.localeCompare(b.domain))
+      });
+
+    } catch (error: any) {
+      console.error("Domain test failed:", error);
+      
+      await storage.addActivityLogEntry({
+        timestamp: new Date(),
+        type: 'error',
+        message: `Domain test failed: ${error.message}`
+      });
+
+      res.status(500).json({ 
+        message: "Domain test failed", 
+        error: error.message 
+      });
+    }
+  });
+
   // Activity log endpoint
   app.get("/api/activity", async (req, res) => {
     try {
@@ -444,4 +512,50 @@ async function processMigration(jobId: string, recordIds: string[], oldIp: strin
       message: `Migration failed: ${error?.message || 'Unknown error'}`,
     });
   }
+}
+
+async function testDomain(domain: string): Promise<{domain: string, status: number | null, currentIp: string | null, error?: string}> {
+  const result = {
+    domain,
+    status: null as number | null,
+    currentIp: null as string | null,
+    error: undefined as string | undefined
+  };
+
+  try {
+    // Get current IP via DNS lookup
+    try {
+      const dnsResult = await dnsLookup(domain);
+      result.currentIp = dnsResult.address;
+    } catch (dnsError: any) {
+      // DNS lookup failed - domain might not exist or have A record
+    }
+
+    // Test HTTP status (try both HTTP and HTTPS)
+    let testUrl = `http://${domain}`;
+    try {
+      const httpResponse = await fetch(testUrl, { 
+        method: 'HEAD',
+        signal: AbortSignal.timeout(10000) // 10 second timeout
+      });
+      result.status = httpResponse.status;
+    } catch (httpError) {
+      // Try HTTPS if HTTP fails
+      try {
+        testUrl = `https://${domain}`;
+        const httpsResponse = await fetch(testUrl, { 
+          method: 'HEAD',
+          signal: AbortSignal.timeout(10000) // 10 second timeout
+        });
+        result.status = httpsResponse.status;
+      } catch (httpsError: any) {
+        result.error = `HTTP/HTTPS test failed: ${httpsError.message}`;
+      }
+    }
+
+  } catch (error: any) {
+    result.error = error.message;
+  }
+
+  return result;
 }
