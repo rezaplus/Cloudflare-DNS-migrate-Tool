@@ -109,7 +109,7 @@ export class MemStorage implements IStorage {
 
   async getDnsRecordsByIp(ip: string): Promise<DnsRecord[]> {
     return Array.from(this.dnsRecords.values()).filter(record => 
-      record.content === ip && (record.type === 'A' || record.type === 'AAAA')
+      record.content === ip
     );
   }
 
