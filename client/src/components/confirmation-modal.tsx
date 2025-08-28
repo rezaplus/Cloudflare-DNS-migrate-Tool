@@ -29,11 +29,12 @@ export default function ConfirmationModal({
       return await apiRequest("POST", "/api/migration/start", data);
     },
     onSuccess: (response: any) => {
+      const jobId = response?.jobId || response?.data?.jobId;
       toast({
         title: "Migration Started",
         description: `Migration job has been started for ${selectedRecords.length} records.`,
       });
-      onConfirm(response.jobId);
+      onConfirm(jobId);
     },
     onError: (error: any) => {
       toast({
