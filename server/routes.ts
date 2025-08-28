@@ -153,8 +153,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
           const recordsResponse: any = await cfApi.getDnsRecords(zone.id);
           const records = recordsResponse.result.map((record: any) => ({
             id: record.id,
-            zoneId: record.zone_id,
-            zoneName: record.zone_name,
+            zoneId: zone.id, // Use the zone.id from our loop to ensure it's set
+            zoneName: zone.name, // Use the zone.name from our loop to ensure it's set
             name: record.name,
             type: record.type,
             content: record.content,
