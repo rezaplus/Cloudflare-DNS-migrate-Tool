@@ -30,7 +30,7 @@ export default function MigrationConfig({
     onSuccess: (data: any) => {
       toast({
         title: "DNS Scan Completed",
-        description: `Found ${data.records} DNS records in ${data.zones} zones`,
+        description: `Found ${data?.records || 0} DNS records in ${data?.zones || 0} zones`,
       });
       onRecordsRefresh();
     },
