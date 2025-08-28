@@ -40,11 +40,35 @@ class CloudflareAPI {
   }
 
   async getZones() {
-    return this.request("/zones");
+    let allZones = [];
+    let page = 1;
+    let hasMorePages = true;
+
+    while (hasMorePages) {
+      const response: any = await this.request(`/zones?page=${page}&per_page=50`);
+      allZones.push(...response.result);
+      
+      hasMorePages = response.result_info?.total_pages > page;
+      page++;
+    }
+
+    return { result: allZones };
   }
 
   async getDnsRecords(zoneId: string) {
-    return this.request(`/zones/${zoneId}/dns_records`);
+    let allRecords = [];
+    let page = 1;
+    let hasMorePages = true;
+
+    while (hasMorePages) {
+      const response: any = await this.request(`/zones/${zoneId}/dns_records?page=${page}&per_page=100`);
+      allRecords.push(...response.result);
+      
+      hasMorePages = response.result_info?.total_pages > page;
+      page++;
+    }
+
+    return { result: allRecords };
   }
 
   async updateDnsRecord(zoneId: string, recordId: string, data: any) {

@@ -31,8 +31,8 @@ export default function DnsRecordsTable({
     // Apply search filter
     if (searchTerm) {
       filtered = filtered.filter(record => 
-        record.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
-        record.zoneName.toLowerCase().includes(searchTerm.toLowerCase())
+        record.name?.toLowerCase().includes(searchTerm.toLowerCase()) ||
+        record.zoneName?.toLowerCase().includes(searchTerm.toLowerCase())
       );
     }
 
